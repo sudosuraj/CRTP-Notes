@@ -1,8 +1,11 @@
 (function() {
+    // Remove previous toggle if it exists
     const oldBtn = document.getElementById('sidebar-toggle');
     if (oldBtn) oldBtn.remove();
     const oldStyle = document.getElementById('sidebar-toggle-style');
     if (oldStyle) oldStyle.remove();
+
+    // Inject styles for the button and hidden state
     const style = document.createElement('style');
     style.id = 'sidebar-toggle-style';
     style.innerHTML = `
@@ -14,14 +17,13 @@
             background: #0969da;
             color: #ffffff;
             border: none;
-            border-radius: 6px;
-            padding: 8px 14px;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            font-size: 13px;
-            font-weight: 600;
+            border-radius: 4px;
+            padding: 4px 6px;
+            font-size: 11px;
+            line-height: 1;
             cursor: pointer;
-            box-shadow: 0 2px 6px rgba(0,0,0,0.15);
-            transition: background 0.15s ease, left 0.2s ease;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.15);
+            transition: background 0.15s ease;
         }
         #sidebar-toggle:hover {
             background: #0860ca;
@@ -63,11 +65,9 @@
     btn.textContent = '☰';
 
     btn.addEventListener('click', () => {
-        const hidden = document.body.classList.toggle('bh-sidebar-hidden');
-        btn.textContent = hidden ? '☰' : '☰';
-        btn.style.left = hidden ? '12px' : '12px';
+        document.body.classList.toggle('bh-sidebar-hidden');
     });
 
     document.body.appendChild(btn);
-    console.log('Sidebar toggle added. Click the button in the top-left.');
+    console.log('Sidebar toggle added.');
 })();
