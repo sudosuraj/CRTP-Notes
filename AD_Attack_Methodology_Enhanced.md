@@ -112,10 +112,18 @@ Get-DomainOU | select -ExpandProperty name
 Get-DomainGPO | select displayname, name
 
 # Get GPO applied to OU
-(Get-DomainOU -Identity DevOps).gplink
-# Extract GUID: substring method or manual copy
+PS C:\AD\Tools> (Get-DomainOU -Identity DevOps).gplink
+# Output: [LDAP://cn={0BF8D01C-1F62-4BDC-958C-57140B67D147},cn=policies,cn=system,DC=dollarcorp,DC=moneycorp,DC=local;0]
 
-# Get specific GPO details
+# Method 1: Manual GUID extraction
+# Copy GUID from gplink output (between { and })
+Get-DomainGPO -Identity '{0BF8D01C-1F62-4BDC-958C-57140B67D147}'
+
+# Method 2: Automated GUID extraction using substring
+# Extracts 36 characters starting at position 11 (GUID length is fixed at 36)
+Get-DomainGPO -Identity (Get-DomainOU -Identity DevOps).gplink.substring(11,(Get-DomainOU -Identity DevOps).gplink.length-72)
+
+# Get specific GPO details by GUID
 Get-DomainGPO -Identity '{GUID-HERE}'
 ```
 
@@ -147,16 +155,32 @@ Get-ForestDomain -Forest external.local
 
 #### Trust Mapping
 ```powershell
-# PowerView
+# PowerView - List trusts for current domain
 Get-DomainTrust
+
+# PowerView - Map trusts across all domains in forest
 Get-ForestDomain | %{Get-DomainTrust -Domain $_.Name}
 
-# Filter external trusts
+# PowerView - Filter to external trusts only (non-transitive)
 Get-DomainTrust | ?{$_.TrustAttributes -eq "FILTER_SIDS"}
 
-# AD Module
+# PowerView - Enumerate trusts in trusting forest (requires bi-directional trust)
+Get-ForestDomain -Forest external.local | %{Get-DomainTrust -Domain $_.Name}
+
+# AD Module - List all trusts in current domain
 Get-ADTrust -Filter *
+
+# AD Module - List all trusts across forest domains
+Get-ADForest | %{Get-ADTrust -Filter *}
+
+# AD Module - Filter to external trusts only
+(Get-ADForest).Domains | %{Get-ADTrust -Filter '(intraForest -ne $True) -and (ForestTransitive -ne $True)' -Server $_}
+
+# AD Module - Filter external trusts in specific domain
 Get-ADTrust -Filter '(intraForest -ne $True) -and (ForestTransitive -ne $True)'
+
+# AD Module - Enumerate trusts in trusting forest
+Get-ADTrust -Filter * -Server external.local
 ```
 
 **Trust Attributes Analysis:**
