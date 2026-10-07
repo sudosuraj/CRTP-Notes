@@ -243,12 +243,29 @@ Get-DomainUser | %{Get-DomainUserLocation -UserName $_.samaccountname}
 
 ### ACL Enumeration Methodology
 
-#### Find Interesting ACLs for User
+#### Enumerate ACLs on Specific Objects
 ```powershell
-# For specific user
+# Get all ACLs on a specific object (e.g., Domain Admins group)
+Get-DomainObjectAcl -Identity "Domain Admins" -ResolveGUIDs -Verbose
+
+# Output fields:
+# - AceQualifier: AccessAllowed / AccessDenied
+# - ObjectDN: Target object
+# - ActiveDirectoryRights: ReadProperty, WriteProperty, GenericAll, etc.
+# - ObjectAceType: Specific property being modified
+# - SecurityIdentifier: Who has the permission
+# - IdentityReferenceName: Resolved name of the principal
+```
+
+#### Find Interesting ACLs Across Domain
+```powershell
+# Find all interesting permissions in domain
+Find-InterestingDomainACL -ResolveGUIDs
+
+# Filter by specific user
 Find-InterestingDomainACL -ResolveGUIDs | ?{$_.IdentityReferenceName -match "StudentX"}
 
-# For specific group (e.g., RDPUsers that studentx is member of)
+# Filter by specific group (e.g., RDPUsers that studentx is member of)
 Find-InterestingDomainACL -ResolveGUIDs | ?{$_.IdentityReferenceName -match "RDPUsers"}
 
 # Output fields to analyze:
