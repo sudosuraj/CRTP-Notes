@@ -98,30 +98,73 @@ mindmap
       dcorp-mgmt
         Vault creds
         Kerberoasting
+      WMI lateral movement
+        Invoke-WmiMethod
+        Win32_Process Create
+    Hash-Based Movement
+      Pass-the-Hash
+        sekurlsa::pth
+        NTLM auth
+      OverPass-the-Hash
+        Rubeus asktgt /rc4
+        Hash to TGT
+      Pass-the-Ticket
+        Rubeus ptt
+        Inject existing ticket
+    Credential Attacks
+      Kerberoasting
+        svcadmin SPN
+        John/Hashcat crack
+      AS-REP Roasting
+        DONT_REQUIRE_PREAUTH
+        No creds needed
+    ACL Abuse
+      GenericAll
+        Reset password
+        Add to group
+      WriteDACL
+        Grant DCSync to self
+      ForceChangePassword
+        Direct escalation
     Domain Dominance
       dcorp-dc
         DCSync
         Golden Ticket
         Silver Ticket
         Diamond Ticket
-        Persistence
+    Persistence
+      DSRM
+        lsadump::lsa /patch
+        DC local admin forever
+      Security Descriptors
+        RACE.ps1 backdoors
+      WMI Subscriptions
+        Fileless persistence
+      Scheduled Tasks
+        SYSTEM on schedule
     Forest Escalation
       Unconstrained Delegation
         dcorp-appsrv
         Coerce + capture DC TGT
         Root domain compromise
-      Trust Key
-        SID History
+      Trust Key + SID History
         Inter-realm TGT
-      Enterprise Admin
-        moneycorp.local
+        Enterprise Admin
+      moneycorp.local EA
+    Child Domains
+      us.dollarcorp
+        us-web constrained deleg
+        us-mgmt unconstrained
+        SID history golden ticket
+      eu.eurocorp.local
+        From eu-sqlx lateral
+        From eurocorp-dc parent trust
     Special Attacks
       Constrained Delegation
         websvc → dcorp-mssql
         Machine account → DCSync
       RBCD
         ciadmin GenericWrite
-        FakeComputer → dcorp-mgmt
       AD CS
         ESC1 HTTPSCertificates
         ESC3 SmartCard templates
